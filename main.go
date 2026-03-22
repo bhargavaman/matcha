@@ -150,11 +150,11 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Save draft to disk
 		if msg.ComposerState != nil {
 			draft := msg.ComposerState.ToDraft()
-			go func() {
-				if err := config.SaveDraft(draft); err != nil {
-					log.Printf("Error saving draft: %v", err)
-				}
-			}()
+
+			if err := config.SaveDraft(draft); err != nil {
+				log.Printf("Error saving draft: %v", err)
+			}
+
 		}
 		m.current = tui.NewChoice()
 		m.current, _ = m.current.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})

@@ -56,7 +56,6 @@ func getTerminalCellSize() int {
 	return defaultCellHeight
 }
 
-
 // hyperlinkSupported checks if the terminal supports OSC 8 hyperlinks.
 func hyperlinkSupported() bool {
 	term := strings.ToLower(os.Getenv("TERM"))

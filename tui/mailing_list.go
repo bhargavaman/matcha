@@ -29,10 +29,10 @@ func NewMailingListEditor() *MailingListEditor {
 	addr.Placeholder = "e.g., alice@example.com, bob@example.com"
 
 	return &MailingListEditor{
-		nameInput:  name,
-		addrInput:  addr,
-		focus:      0,
-		editIndex:  -1,
+		nameInput: name,
+		addrInput: addr,
+		focus:     0,
+		editIndex: -1,
 	}
 }
 
