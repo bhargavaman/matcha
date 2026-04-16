@@ -297,8 +297,19 @@ func entityToEmail(header *message.Header, msgInfo pop3client.MessageID, account
 
 	var to []string
 	if toHeader := header.Get("To"); toHeader != "" {
-		for _, addr := range strings.Split(toHeader, ",") {
-			to = append(to, strings.TrimSpace(addr))
+		if addrs, err := mail.ParseAddressList(toHeader); err == nil {
+			for _, addr := range addrs {
+				to = append(to, addr.Address)
+			}
+		}
+	}
+
+	var replyTo []string
+	if replyToHeader := header.Get("Reply-To"); replyToHeader != "" {
+		if addrs, err := mail.ParseAddressList(replyToHeader); err == nil {
+			for _, addr := range addrs {
+				replyTo = append(replyTo, addr.Address)
+			}
 		}
 	}
 
@@ -327,6 +338,7 @@ func entityToEmail(header *message.Header, msgInfo pop3client.MessageID, account
 		UID:       hashUID(uidStr),
 		From:      from,
 		To:        to,
+		ReplyTo:   replyTo,
 		Subject:   subject,
 		Date:      date,
 		IsRead:    false,
