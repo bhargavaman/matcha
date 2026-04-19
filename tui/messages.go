@@ -3,6 +3,7 @@ package tui
 import (
 	"github.com/floatpane/matcha/calendar"
 	"github.com/floatpane/matcha/config"
+	"github.com/floatpane/matcha/daemonrpc"
 	"github.com/floatpane/matcha/fetcher"
 )
 
@@ -380,8 +381,9 @@ type FoldersFetchedMsg struct {
 
 // SwitchFolderMsg signals switching to a different IMAP folder.
 type SwitchFolderMsg struct {
-	FolderName string
-	AccountID  string
+	FolderName     string
+	PreviousFolder string
+	AccountID      string
 }
 
 // FolderEmailsFetchedMsg signals that emails from a folder have been fetched.
@@ -461,6 +463,13 @@ type EditorFinishedMsg struct {
 type IdleNewMailMsg struct {
 	AccountID  string
 	FolderName string
+}
+
+// --- Daemon Messages ---
+
+// DaemonEventMsg wraps an event pushed from the daemon process.
+type DaemonEventMsg struct {
+	Event *daemonrpc.Event
 }
 
 // --- Plugin Messages ---
