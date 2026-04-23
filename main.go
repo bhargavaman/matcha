@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/floatpane/matcha/calendar"
 	matchaCli "github.com/floatpane/matcha/cli"
 	"github.com/floatpane/matcha/clib"
+	"github.com/floatpane/matcha/clib/macos"
 	"github.com/floatpane/matcha/config"
 	matchaDaemon "github.com/floatpane/matcha/daemon"
 	"github.com/floatpane/matcha/daemonclient"
@@ -110,9 +112,11 @@ type mainModel struct {
 	service daemonclient.Service
 	// Plugin prompt waiting for user input
 	pendingPrompt *plugin.PendingPrompt
+	// mailto: URL parsed from os.Args
+	mailtoURL *url.URL
 }
 
-func newInitialModel(cfg *config.Config) *mainModel {
+func newInitialModel(cfg *config.Config, mailtoURL *url.URL) *mainModel {
 	idleUpdates := make(chan fetcher.IdleUpdate, 16)
 	initialModel := &mainModel{
 		emailsByAcct: make(map[string][]fetcher.Email),
@@ -120,6 +124,7 @@ func newInitialModel(cfg *config.Config) *mainModel {
 		idleUpdates:  idleUpdates,
 		idleWatcher:  fetcher.NewIdleWatcher(idleUpdates),
 		providers:    make(map[string]backend.Provider),
+		mailtoURL:    mailtoURL,
 	}
 
 	if cfg == nil || !cfg.HasAccounts() {
@@ -129,7 +134,22 @@ func newInitialModel(cfg *config.Config) *mainModel {
 		}
 		initialModel.current = tui.NewLogin(hideTips)
 	} else {
-		initialModel.current = tui.NewChoice()
+		if mailtoURL != nil {
+			// mailto:addr@example.com?subject=test
+			to := mailtoURL.Opaque
+			if to == "" {
+				to = mailtoURL.Path
+			}
+			if to == "" {
+				to = mailtoURL.Query().Get("to")
+			}
+			subject := mailtoURL.Query().Get("subject")
+			body := mailtoURL.Query().Get("body")
+			initialModel.current = tui.NewComposerWithAccounts(cfg.Accounts, cfg.Accounts[0].ID, to, subject, body, cfg.HideTips)
+		} else {
+
+			initialModel.current = tui.NewChoice()
+		}
 		initialModel.config = cfg
 	}
 	return initialModel
@@ -163,6 +183,30 @@ func (m *mainModel) getProvider(acct *config.Account) backend.Provider {
 
 func (m *mainModel) Init() tea.Cmd {
 	return tea.Batch(m.current.Init(), checkForUpdatesCmd())
+}
+
+func (m *mainModel) syncUnreadBadge() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	count := 0
+	// Count unread across all accounts (cached/loaded emails)
+	for _, emails := range m.emailsByAcct {
+		for _, e := range emails {
+			if !e.IsRead {
+				count++
+			}
+		}
+	}
+	// Also check folderEmails for unread status
+	for _, emails := range m.folderEmails {
+		for _, e := range emails {
+			if !e.IsRead {
+				count++
+			}
+		}
+	}
+	_ = macos.SetBadge(count)
 }
 
 func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -761,6 +805,7 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.emailsByAcct[accID] = refreshed
 		}
 		m.emails = flattenAndSort(m.emailsByAcct)
+		m.syncUnreadBadge()
 
 		// Update folder inbox if it exists
 		if m.folderInbox != nil {
@@ -772,6 +817,7 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tui.AllEmailsFetchedMsg:
 		m.emailsByAcct = msg.EmailsByAccount
 		m.emails = flattenAndSort(msg.EmailsByAccount)
+		m.syncUnreadBadge()
 
 		if m.folderInbox != nil {
 			m.folderInbox.SetEmails(m.emails, m.config.Accounts)
@@ -785,6 +831,8 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.emailsByAcct[msg.AccountID] = msg.Emails
 		m.emails = flattenAndSort(m.emailsByAcct)
+		m.syncUnreadBadge()
+
 		if m.folderInbox != nil {
 			m.folderInbox.SetEmails(m.emails, m.config.Accounts)
 		}
@@ -818,6 +866,7 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		unique := filterUnique(m.emailsByAcct[msg.AccountID], msg.Emails)
 		m.emailsByAcct[msg.AccountID] = append(m.emailsByAcct[msg.AccountID], unique...)
 		m.emails = append(m.emails, unique...)
+		m.syncUnreadBadge()
 		return m, nil
 
 	case tui.GoToSendMsg:
@@ -995,7 +1044,20 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.current = tui.NewLogin(hideTips)
 		} else {
 			m.config = cfg
-			m.current = tui.NewChoice()
+			if m.mailtoURL != nil {
+				to := m.mailtoURL.Opaque
+				if to == "" {
+					to = m.mailtoURL.Path
+				}
+				if to == "" {
+					to = m.mailtoURL.Query().Get("to")
+				}
+				subject := m.mailtoURL.Query().Get("subject")
+				body := m.mailtoURL.Query().Get("body")
+				m.current = tui.NewComposerWithAccounts(cfg.Accounts, cfg.Accounts[0].ID, to, subject, body, cfg.HideTips)
+			} else {
+				m.current = tui.NewChoice()
+			}
 		}
 		m.current, _ = m.current.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
 		return m, m.current.Init()
@@ -1260,6 +1322,16 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tui.GoToFilePickerMsg:
+		if runtime.GOOS == "darwin" {
+			return m, func() tea.Msg {
+				wd, _ := os.Getwd()
+				paths, err := macos.OpenFilePicker(wd)
+				if err != nil || len(paths) == 0 {
+					return tui.CancelFilePickerMsg{}
+				}
+				return tui.FileSelectedMsg{Paths: paths}
+			}
+		}
 		m.previousModel = m.current
 		wd, _ := os.Getwd()
 		m.current = tui.NewFilePicker(wd)
@@ -1414,6 +1486,7 @@ func (m *mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			log.Printf("Error marking email as read: %v", msg.Err)
 		}
+		m.syncUnreadBadge()
 		return m, nil
 
 	case tui.EmailActionDoneMsg:
@@ -3447,10 +3520,28 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Contacts export CLI subcommand: matcha contacts export [flags]
-	if len(os.Args) > 1 && os.Args[1] == "contacts" && len(os.Args) > 2 && os.Args[2] == "export" {
-		if err := matchaCli.RunContactsExport(os.Args[3:]); err != nil {
-			fmt.Fprintf(os.Stderr, "contacts export failed: %v\n", err)
+	// Contacts CLI subcommand: matcha contacts <export|sync> [flags]
+	if len(os.Args) > 1 && os.Args[1] == "contacts" && len(os.Args) > 2 {
+		switch os.Args[2] {
+		case "export":
+			if err := matchaCli.RunContactsExport(os.Args[3:]); err != nil {
+				fmt.Fprintf(os.Stderr, "contacts export failed: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		case "sync":
+			if err := matchaCli.RunContactsSync(os.Args[3:]); err != nil {
+				fmt.Fprintf(os.Stderr, "contacts sync failed: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}
+
+	// setup-mailto CLI subcommand: matcha setup-mailto
+	if len(os.Args) > 1 && os.Args[1] == "setup-mailto" {
+		if err := matchaCli.SetupMailto(); err != nil {
+			fmt.Fprintf(os.Stderr, "setup-mailto failed: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -3475,12 +3566,19 @@ func main() {
 		log.Printf("Failed to initialize i18n: %v", err)
 	}
 
+	var mailtoURL *url.URL
+	if len(os.Args) > 1 && strings.HasPrefix(strings.ToLower(os.Args[1]), "mailto:") {
+		if u, err := url.Parse(os.Args[1]); err == nil {
+			mailtoURL = u
+		}
+	}
+
 	var initialModel *mainModel
 
 	if config.IsSecureModeEnabled() {
 		// Secure mode: show password prompt before loading config
 		tui.RebuildStyles()
-		initialModel = newInitialModel(nil)
+		initialModel = newInitialModel(nil, mailtoURL)
 		initialModel.current = tui.NewPasswordPrompt()
 	} else {
 		cfg, err := config.LoadConfig()
@@ -3500,9 +3598,9 @@ func main() {
 		_ = config.EnsurePGPDir()
 
 		if err != nil {
-			initialModel = newInitialModel(nil)
+			initialModel = newInitialModel(nil, mailtoURL)
 		} else {
-			initialModel = newInitialModel(cfg)
+			initialModel = newInitialModel(cfg, mailtoURL)
 		}
 	}
 
@@ -3511,6 +3609,20 @@ func main() {
 	plugins.LoadPlugins()
 	initialModel.plugins = plugins
 	plugins.CallHook(plugin.HookStartup)
+
+	// Background sync macOS features
+	if runtime.GOOS == "darwin" {
+		disableNotifications := false
+		if initialModel.config != nil {
+			disableNotifications = initialModel.config.DisableNotifications
+		}
+		if !disableNotifications {
+			go func() {
+				_ = config.SyncMacOSContacts()
+				_ = theme.SyncWithMacOS()
+			}()
+		}
+	}
 
 	p := tea.NewProgram(initialModel)
 
