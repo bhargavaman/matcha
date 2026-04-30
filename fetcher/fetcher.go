@@ -110,10 +110,44 @@ func hasSeenFlag(flags []imap.Flag) bool {
 	return slices.Contains(flags, imap.FlagSeen)
 }
 
+// normalizeGmailAddress canonicalizes a Gmail address by stripping the "+tag"
+// subaddress and removing dots from the local part. Gmail treats
+// "u.s.e.r+tag@gmail.com" and "user@gmail.com" as the same mailbox.
+func normalizeGmailAddress(addr string) string {
+	at := strings.LastIndex(addr, "@")
+	if at < 0 {
+		return addr
+	}
+	local, domain := addr[:at], addr[at:]
+	if plus := strings.Index(local, "+"); plus >= 0 {
+		local = local[:plus]
+	}
+	local = strings.ReplaceAll(local, ".", "")
+	return local + domain
+}
+
+// addressMatches reports whether candidate matches the configured fetch email.
+// For Gmail accounts, subaddressed forms ("local+tag@gmail.com") and dotted
+// forms ("l.o.c.a.l@gmail.com") also match.
+// fetchEmail must already be lowercased and trimmed.
+func addressMatches(candidate, fetchEmail string, account *config.Account) bool {
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	if candidate == "" || fetchEmail == "" {
+		return false
+	}
+	if candidate == fetchEmail {
+		return true
+	}
+	if account != nil && strings.EqualFold(account.ServiceProvider, "gmail") {
+		return normalizeGmailAddress(candidate) == normalizeGmailAddress(fetchEmail)
+	}
+	return false
+}
+
 // deliveryHeadersMatch checks if any of the Delivered-To, X-Forwarded-To, or
 // X-Original-To headers contain the given email address. This catches
 // auto-forwarded emails where the envelope To/Cc don't match the local account.
-func deliveryHeadersMatch(data []byte, fetchEmail string) bool {
+func deliveryHeadersMatch(data []byte, fetchEmail string, account *config.Account) bool {
 	if len(data) == 0 {
 		return false
 	}
@@ -125,7 +159,7 @@ func deliveryHeadersMatch(data []byte, fetchEmail string) bool {
 	}
 	for _, key := range []string{"Delivered-To", "X-Forwarded-To", "X-Original-To"} {
 		for _, val := range headers.Values(key) {
-			if strings.EqualFold(strings.TrimSpace(val), fetchEmail) {
+			if addressMatches(val, fetchEmail, account) {
 				return true
 			}
 		}
@@ -469,12 +503,12 @@ func FetchMailboxEmails(account *config.Account, mailbox string, limit, offset u
 				if len(msg.Envelope.From) > 0 {
 					senderEmail = msg.Envelope.From[0].Addr()
 				}
-				if strings.EqualFold(strings.TrimSpace(senderEmail), fetchEmail) {
+				if addressMatches(senderEmail, fetchEmail, account) {
 					matched = true
 				}
 			} else {
 				for _, r := range toAddrList {
-					if strings.EqualFold(strings.TrimSpace(r), fetchEmail) {
+					if addressMatches(r, fetchEmail, account) {
 						matched = true
 						break
 					}
@@ -482,7 +516,7 @@ func FetchMailboxEmails(account *config.Account, mailbox string, limit, offset u
 				// Check delivery headers for auto-forwarded emails
 				if !matched {
 					headerData := msg.FindBodySection(deliveryHeaderSection)
-					matched = deliveryHeadersMatch(headerData, fetchEmail)
+					matched = deliveryHeadersMatch(headerData, fetchEmail, account)
 				}
 			}
 
@@ -1485,13 +1519,13 @@ func FetchArchiveEmails(account *config.Account, limit, offset uint32) ([]Email,
 		// For archive/All Mail, match emails where user is sender OR recipient
 		matched := false
 		// Check if user is the sender
-		if strings.EqualFold(strings.TrimSpace(fromAddr), fetchEmail) {
+		if addressMatches(fromAddr, fetchEmail, account) {
 			matched = true
 		}
 		// Check if user is a recipient
 		if !matched {
 			for _, r := range toAddrList {
-				if strings.EqualFold(strings.TrimSpace(r), fetchEmail) {
+				if addressMatches(r, fetchEmail, account) {
 					matched = true
 					break
 				}
@@ -1500,7 +1534,7 @@ func FetchArchiveEmails(account *config.Account, limit, offset uint32) ([]Email,
 		// Check delivery headers for auto-forwarded emails
 		if !matched {
 			headerData := msg.FindBodySection(deliveryHeaderSection)
-			matched = deliveryHeadersMatch(headerData, fetchEmail)
+			matched = deliveryHeadersMatch(headerData, fetchEmail, account)
 		}
 
 		if !matched {
